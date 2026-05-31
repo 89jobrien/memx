@@ -723,4 +723,152 @@ mod tests {
         let store = test_store();
         assert_store_contract(&store);
     }
+
+    // ── Unit edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn transcript_without_session_fk_fails() {
+        let store = test_store();
+        // Enable FK enforcement (SQLite has it off by default)
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = ON")
+            .expect("pragma");
+        let chunk = TranscriptChunk {
+            id: EntryId::new(),
+            session_id: EntryId::new(), // no matching session
+            timestamp: Utc::now(),
+            content: "orphan chunk".into(),
+        };
+        let result = store.insert_transcript(&chunk);
+        assert!(result.is_err(), "FK violation should fail with PRAGMA on");
+    }
+
+    #[test]
+    fn search_score_in_zero_one_range() {
+        let store = test_store();
+        let e = MemoryEntry::new(Section::ActiveThreads, "test".into());
+        store
+            .insert_entry(&e, &[1.0, 0.0, 0.0, 0.0])
+            .expect("insert");
+        let results = store
+            .search_similar(&[1.0, 0.0, 0.0, 0.0], 1, None)
+            .expect("search");
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].score >= 0.0 && results[0].score <= 1.0,
+            "score {} out of [0,1] range",
+            results[0].score
+        );
+    }
+
+    #[test]
+    fn session_with_unicode_roundtrips() {
+        let store = test_store();
+        let date = NaiveDate::from_ymd_opt(2026, 6, 1).expect("valid");
+        let mut session = SessionLog::new(date, 1);
+        session.goal = Some("implement \u{1F980} crab tests".into());
+        session.deliverables = vec!["\u{00E9}l\u{00E8}ve".into()];
+        session.decisions = vec!["\u{4F60}\u{597D}".into()];
+        store.insert_session(&session).expect("insert");
+
+        let sessions = store.get_sessions_for_date(date).expect("get");
+        assert_eq!(
+            sessions[0].goal.as_deref(),
+            Some("implement \u{1F980} crab tests")
+        );
+        assert_eq!(sessions[0].deliverables[0], "\u{00E9}l\u{00E8}ve");
+        assert_eq!(sessions[0].decisions[0], "\u{4F60}\u{597D}");
+    }
+
+    #[test]
+    fn insert_entry_with_empty_content() {
+        let store = test_store();
+        let e = MemoryEntry::new(Section::ActiveThreads, String::new());
+        store.insert_entry(&e, &emb()).expect("insert empty");
+        let retrieved = store.get_entry(e.id).expect("get");
+        assert_eq!(retrieved.content, "");
+        assert_eq!(store.total_chars(None).expect("chars"), 0);
+    }
+
+    #[test]
+    fn duplicate_insert_fails() {
+        let store = test_store();
+        let e = MemoryEntry::new(Section::ActiveThreads, "dup".into());
+        store.insert_entry(&e, &emb()).expect("first insert");
+        let result = store.insert_entry(&e, &emb());
+        assert!(result.is_err(), "duplicate PK insert should fail");
+    }
+
+    // ── Property tests ─────────────────────────────────────────────
+
+    mod property {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn insert_get_roundtrip_content(content in "\\PC{0,500}") {
+                let store = test_store();
+                let entry = MemoryEntry::new(Section::ActiveThreads, content.clone());
+                store.insert_entry(&entry, &emb()).expect("insert");
+                let retrieved = store.get_entry(entry.id).expect("get");
+                prop_assert_eq!(retrieved.content, content);
+            }
+
+            #[test]
+            fn total_chars_matches_sum(
+                contents in proptest::collection::vec("\\PC{1,100}", 1..10)
+            ) {
+                let store = test_store();
+                let mut expected_chars = 0usize;
+                for c in &contents {
+                    let entry = MemoryEntry::new(Section::ActiveThreads, c.clone());
+                    store.insert_entry(&entry, &emb()).expect("insert");
+                    expected_chars += c.chars().count();
+                }
+                let total = store.total_chars(None).expect("total");
+                prop_assert_eq!(total, expected_chars);
+            }
+
+            #[test]
+            fn list_filtered_never_leaks_other_sections(
+                a_count in 1..5usize,
+                b_count in 1..5usize,
+            ) {
+                let store = test_store();
+                for _ in 0..a_count {
+                    let e = MemoryEntry::new(Section::ActiveThreads, "a".into());
+                    store.insert_entry(&e, &emb()).expect("insert a");
+                }
+                for _ in 0..b_count {
+                    let e = MemoryEntry::new(Section::EnvironmentNotes, "b".into());
+                    store.insert_entry(&e, &emb()).expect("insert b");
+                }
+                let filtered = store
+                    .list_entries(Some(&Section::ActiveThreads))
+                    .expect("list");
+                prop_assert_eq!(filtered.len(), a_count);
+                for e in &filtered {
+                    prop_assert_eq!(&e.section, &Section::ActiveThreads);
+                }
+            }
+
+            #[test]
+            fn delete_then_get_is_not_found(
+                content in "\\PC{1,100}",
+                section in prop_oneof![
+                    Just(Section::ActiveThreads),
+                    Just(Section::EnvironmentNotes),
+                ],
+            ) {
+                let store = test_store();
+                let entry = MemoryEntry::new(section, content);
+                store.insert_entry(&entry, &emb()).expect("insert");
+                store.delete_entry(entry.id).expect("delete");
+                let result = store.get_entry(entry.id);
+                prop_assert!(matches!(result, Err(MemxError::NotFound(_))));
+            }
+        }
+    }
 }

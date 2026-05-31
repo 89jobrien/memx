@@ -54,4 +54,82 @@ mod tests {
         let result = e.embed_one("hello").unwrap();
         assert_eq!(result.len(), 4);
     }
+
+    // ── Unit edge cases ────────────────────────────────────────────
+
+    struct EmptyEmbedder;
+
+    impl Embedder for EmptyEmbedder {
+        fn embed(&self, _texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(vec![])
+        }
+        fn dimensions(&self) -> usize {
+            4
+        }
+        fn model_id(&self) -> &str {
+            "empty"
+        }
+    }
+
+    #[test]
+    fn embed_one_errors_on_empty_results() {
+        let e = EmptyEmbedder;
+        let result = e.embed_one("hello");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty results"));
+    }
+
+    #[test]
+    fn embed_empty_batch() {
+        let e = MockEmbedder;
+        let results = e.embed(&[]).unwrap();
+        assert!(results.is_empty());
+    }
+
+    // ── Conformance: Embedder trait contract ───────────────────────
+
+    fn assert_embedder_contract(embedder: &dyn Embedder) {
+        // dimensions() is consistent
+        let dims = embedder.dimensions();
+        assert!(dims > 0, "dimensions must be positive");
+
+        // model_id() is non-empty
+        assert!(
+            !embedder.model_id().is_empty(),
+            "model_id must be non-empty"
+        );
+
+        // embed_one returns vector of correct length
+        let single = embedder.embed_one("test input").expect("embed_one");
+        assert_eq!(
+            single.len(),
+            dims,
+            "embed_one length must equal dimensions()"
+        );
+
+        // embed batch returns correct count with correct lengths
+        let batch_input = &["alpha", "beta", "gamma"];
+        let batch = embedder.embed(batch_input).expect("embed batch");
+        assert_eq!(
+            batch.len(),
+            batch_input.len(),
+            "embed batch length must equal input length"
+        );
+        for (i, vec) in batch.iter().enumerate() {
+            assert_eq!(
+                vec.len(),
+                dims,
+                "embed batch[{i}] length must equal dimensions()"
+            );
+        }
+
+        // embed empty batch returns empty
+        let empty = embedder.embed(&[]).expect("embed empty");
+        assert!(empty.is_empty(), "embed empty batch must return empty");
+    }
+
+    #[test]
+    fn mock_embedder_satisfies_contract() {
+        assert_embedder_contract(&MockEmbedder);
+    }
 }

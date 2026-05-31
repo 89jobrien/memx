@@ -2,7 +2,8 @@ use crate::error::Result;
 use crate::types::*;
 use chrono::NaiveDate;
 
-pub trait Store: Send {
+// Thread-safety bounds deferred to concrete implementations
+pub trait Store {
     // Memory entries
     fn insert_entry(&self, entry: &MemoryEntry, embedding: &[f32]) -> Result<()>;
     fn update_entry(&self, entry: &MemoryEntry, embedding: &[f32]) -> Result<()>;

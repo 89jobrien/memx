@@ -84,29 +84,6 @@ impl MemoryEntry {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct Budget {
-    pub max_chars: usize,
-}
-
-impl Budget {
-    pub fn new(max_chars: usize) -> Self {
-        Self { max_chars }
-    }
-
-    pub fn allows(&self, current_chars: usize) -> bool {
-        current_chars <= self.max_chars
-    }
-
-    pub fn memory_default() -> Self {
-        Self { max_chars: 2500 }
-    }
-
-    pub fn user_profile_default() -> Self {
-        Self { max_chars: 1375 }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionLog {
     pub id: EntryId,
@@ -140,23 +117,11 @@ pub struct TranscriptChunk {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserProfile {
     pub about: String,
     pub preferences: Vec<String>,
     pub working_style: String,
-    pub budget: Budget,
-}
-
-impl Default for UserProfile {
-    fn default() -> Self {
-        Self {
-            about: String::new(),
-            preferences: Vec::new(),
-            working_style: String::new(),
-            budget: Budget::user_profile_default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -277,14 +242,6 @@ mod tests {
         assert_eq!(entry.section, Section::ActiveThreads);
         assert_eq!(entry.content, "working on memx type system");
         assert!(entry.created_at <= Utc::now());
-    }
-
-    #[test]
-    fn budget_check() {
-        let budget = Budget::new(2500);
-        assert!(budget.allows(2000));
-        assert!(budget.allows(2500));
-        assert!(!budget.allows(2501));
     }
 
     #[test]

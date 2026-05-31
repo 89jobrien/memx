@@ -10,6 +10,7 @@ static VEC_INIT: Once = Once::new();
 
 fn ensure_vec_extension() {
     VEC_INIT.call_once(|| unsafe {
+        #[allow(clippy::missing_transmute_annotations)]
         sqlite3_auto_extension(Some(std::mem::transmute(
             sqlite_vec::sqlite3_vec_init as *const (),
         )));
@@ -21,23 +22,7 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        ensure_vec_extension();
-        let conn = Connection::open(path)?;
-        let store = Self { conn };
-        store.migrate()?;
-        Ok(store)
-    }
-
-    pub fn open_in_memory() -> Result<Self> {
-        ensure_vec_extension();
-        let conn = Connection::open_in_memory()?;
-        let store = Self { conn };
-        store.migrate()?;
-        Ok(store)
-    }
-
-    pub fn open_with_dimensions(path: impl AsRef<Path>, dims: usize) -> Result<Self> {
+    pub fn open(path: impl AsRef<Path>, dims: usize) -> Result<Self> {
         ensure_vec_extension();
         let conn = Connection::open(path)?;
         let store = Self { conn };
@@ -45,16 +30,12 @@ impl SqliteStore {
         Ok(store)
     }
 
-    pub fn open_in_memory_with_dimensions(dims: usize) -> Result<Self> {
+    pub fn open_in_memory(dims: usize) -> Result<Self> {
         ensure_vec_extension();
         let conn = Connection::open_in_memory()?;
         let store = Self { conn };
         store.migrate_with_dimensions(dims)?;
         Ok(store)
-    }
-
-    fn migrate(&self) -> Result<()> {
-        self.migrate_with_dimensions(4)
     }
 
     fn migrate_with_dimensions(&self, dims: usize) -> Result<()> {
@@ -157,8 +138,12 @@ impl Store for SqliteStore {
 
     fn delete_entry(&self, id: EntryId) -> Result<()> {
         let id_str = id.to_string();
-        self.conn
+        let changed = self
+            .conn
             .execute("DELETE FROM entries WHERE id = ?1", params![id_str])?;
+        if changed == 0 {
+            return Err(MemxError::NotFound(id));
+        }
         self.conn
             .execute("DELETE FROM entries_vec WHERE id = ?1", params![id_str])?;
         Ok(())
@@ -203,7 +188,7 @@ impl Store for SqliteStore {
                     "SELECT id, section, content, created_at, updated_at
                      FROM entries WHERE section = ?1 ORDER BY created_at",
                 )?;
-                let rows = stmt.query_map(params![s.as_str()], |row| row_to_entry(row))?;
+                let rows = stmt.query_map(params![s.as_str()], row_to_entry)?;
                 for row in rows {
                     entries.push(row?);
                 }
@@ -213,7 +198,7 @@ impl Store for SqliteStore {
                     "SELECT id, section, content, created_at, updated_at
                      FROM entries ORDER BY created_at",
                 )?;
-                let rows = stmt.query_map([], |row| row_to_entry(row))?;
+                let rows = stmt.query_map([], row_to_entry)?;
                 for row in rows {
                     entries.push(row?);
                 }
@@ -305,8 +290,13 @@ impl Store for SqliteStore {
         &self,
         embedding: &[f32],
         top_k: usize,
-        _filter: Option<&SearchFilter>,
+        filter: Option<&SearchFilter>,
     ) -> Result<Vec<SearchResult>> {
+        if filter.is_some() {
+            return Err(MemxError::Other(anyhow::anyhow!(
+                "search filters not yet implemented"
+            )));
+        }
         let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
 
         let mut stmt = self.conn.prepare(
@@ -370,7 +360,7 @@ mod tests {
     use super::*;
 
     fn test_store() -> SqliteStore {
-        SqliteStore::open_in_memory().unwrap()
+        SqliteStore::open_in_memory(4).unwrap()
     }
 
     #[test]

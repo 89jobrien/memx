@@ -1,4 +1,5 @@
-pub trait Embedder: Send + Sync {
+// Thread-safety bounds deferred to concrete implementations
+pub trait Embedder {
     fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>>;
 
     fn embed_one(&self, text: &str) -> anyhow::Result<Vec<f32>> {

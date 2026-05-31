@@ -34,20 +34,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn error_display() {
+    fn budget_exceeded_includes_values() {
         let err = MemxError::BudgetExceeded {
             current: 2600,
             max: 2500,
         };
-        let msg = err.to_string();
+        let msg = MemxError::to_string(&err);
         assert!(msg.contains("2600"));
         assert!(msg.contains("2500"));
     }
 
     #[test]
-    fn error_from_rusqlite() {
+    fn memx_error_from_rusqlite() {
         let sql_err = rusqlite::Error::QueryReturnedNoRows;
-        let err: MemxError = sql_err.into();
+        let err = MemxError::from(sql_err);
         assert!(matches!(err, MemxError::Storage(_)));
     }
 }

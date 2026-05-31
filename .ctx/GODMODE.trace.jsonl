@@ -4,3 +4,10 @@
 {"event":"session.end","session_id":"0701da1-1780242773299","ts":"2026-05-31T16:04:00Z"}
 {"event":"session.end","session_id":"0701da1-1780242773299","ts":"2026-05-31T16:07:33Z"}
 {"event":"session.end","session_id":"0701da1-1780242773299","ts":"2026-05-31T16:10:40Z"}
+{"event":"session.end","session_id":"0701da1-1780242773299","ts":"2026-05-31T16:23:06Z"}
+{"event":"session.end","session_id":"0701da1-1780242773299","ts":"2026-05-31T16:25:45Z"}
+{"event":"session.end","session_id":"0701da1-1780242773299","ts":"2026-05-31T16:29:15Z"}
+{"event":"session.end","session_id":"0701da1-1780242773299","ts":"2026-05-31T16:37:47Z"}
+{"event":"session.end","session_id":"0701da1-1780242773299","ts":"2026-05-31T16:46:03Z"}
+{"cwd":"/Users/joe/dev/memx","event":"session.start","session_id":"1fb39ec-1780246944867","ts":"2026-05-31T17:02:24Z"}
+{"event":"session.end","session_id":"1fb39ec-1780246944867","ts":"2026-05-31T17:32:51Z"}

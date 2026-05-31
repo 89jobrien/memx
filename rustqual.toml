@@ -1,0 +1,4 @@
+# rustqual configuration for memx workspace
+# Dead code detection off — pub API is consumed cross-crate
+[duplicates]
+detect_dead_code = false

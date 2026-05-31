@@ -1,6 +1,9 @@
 use crate::error::{MemxError, Result};
 use crate::store::Store;
-use crate::types::*;
+use crate::types::{
+    EntryId, MatchSource, MemoryEntry, SearchFilter, SearchResult, Section, SessionLog,
+    TranscriptChunk,
+};
 use chrono::{NaiveDate, Utc};
 use rusqlite::{Connection, ffi::sqlite3_auto_extension, params};
 use std::path::Path;
@@ -127,9 +130,7 @@ impl Store for SqliteStore {
             params![section, entry.content, updated, id],
         )?;
 
-        if changed == 0 {
-            return Err(MemxError::NotFound(entry.id));
-        }
+        require_affected(changed, entry.id)?;
 
         let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
 
@@ -146,9 +147,7 @@ impl Store for SqliteStore {
         let changed = self
             .conn
             .execute("DELETE FROM entries WHERE id = ?1", params![id_str])?;
-        if changed == 0 {
-            return Err(MemxError::NotFound(id));
-        }
+        require_affected(changed, id)?;
         self.conn
             .execute("DELETE FROM entries_vec WHERE id = ?1", params![id_str])?;
         Ok(())
@@ -401,6 +400,13 @@ impl Store for SqliteStore {
     }
 }
 
+fn require_affected(changed: usize, id: EntryId) -> Result<()> {
+    if changed == 0 {
+        return Err(MemxError::NotFound(id));
+    }
+    Ok(())
+}
+
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryEntry> {
     let id_str: String = row.get(0)?;
     let section_str: String = row.get(1)?;
@@ -435,15 +441,31 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::MemxError;
 
     fn test_store() -> SqliteStore {
-        SqliteStore::open_in_memory(4).unwrap()
+        SqliteStore::open_in_memory(4).expect("in-memory store should open")
+    }
+
+    fn emb() -> Vec<f32> {
+        vec![0.1_f32; 4]
+    }
+
+    // ── Unit tests ──────────────────────────────────────────────
+
+    #[test]
+    fn open_creates_db_file() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let path = dir.path().join("test.db");
+        let store = SqliteStore::open(&path, 4).expect("open should succeed");
+        assert_eq!(store.total_chars(None).expect("total chars"), 0);
+        assert!(path.exists());
     }
 
     #[test]
     fn open_and_migrate() {
         let store = test_store();
-        let count = store.total_chars(None).unwrap();
+        let count = store.total_chars(None).expect("empty store");
         assert_eq!(count, 0);
     }
 
@@ -451,12 +473,105 @@ mod tests {
     fn insert_and_retrieve_entry() {
         let store = test_store();
         let entry = MemoryEntry::new(Section::ActiveThreads, "working on memx".into());
-        let fake_embedding = vec![0.1_f32; 4];
-        store.insert_entry(&entry, &fake_embedding).unwrap();
+        store
+            .insert_entry(&entry, &emb())
+            .expect("insert should succeed");
 
-        let retrieved = store.get_entry(entry.id).unwrap();
+        let retrieved = store.get_entry(entry.id).expect("get should succeed");
         assert_eq!(retrieved.content, "working on memx");
         assert_eq!(retrieved.section, Section::ActiveThreads);
+    }
+
+    #[test]
+    fn update_entry_happy_path() {
+        let store = test_store();
+        let mut entry = MemoryEntry::new(Section::ActiveThreads, "original".into());
+        store
+            .insert_entry(&entry, &emb())
+            .expect("insert should succeed");
+
+        entry.content = "updated".into();
+        entry.section = Section::EnvironmentNotes;
+        store
+            .update_entry(&entry, &emb())
+            .expect("update should succeed");
+
+        let retrieved = store.get_entry(entry.id).expect("get should succeed");
+        assert_eq!(retrieved.content, "updated");
+        assert_eq!(retrieved.section, Section::EnvironmentNotes);
+    }
+
+    #[test]
+    fn update_entry_not_found() {
+        let store = test_store();
+        let entry = MemoryEntry::new(Section::ActiveThreads, "ghost".into());
+        let result = store.update_entry(&entry, &emb());
+        assert!(matches!(result, Err(MemxError::NotFound(_))));
+    }
+
+    #[test]
+    fn delete_entry_existing() {
+        let store = test_store();
+        let entry = MemoryEntry::new(Section::ActiveThreads, "temp".into());
+        store
+            .insert_entry(&entry, &emb())
+            .expect("insert should succeed");
+        store.delete_entry(entry.id).expect("delete should succeed");
+
+        let result = store.get_entry(entry.id);
+        assert!(matches!(result, Err(MemxError::NotFound(_))));
+    }
+
+    #[test]
+    fn delete_entry_not_found() {
+        let store = test_store();
+        let id = EntryId::new();
+        let result = store.delete_entry(id);
+        assert!(matches!(result, Err(MemxError::NotFound(_))));
+    }
+
+    #[test]
+    fn get_entry_not_found() {
+        let store = test_store();
+        let id = EntryId::new();
+        let result = store.get_entry(id);
+        assert!(matches!(result, Err(MemxError::NotFound(_))));
+    }
+
+    #[test]
+    fn list_entries_all() {
+        let store = test_store();
+        let e1 = MemoryEntry::new(Section::ActiveThreads, "first".into());
+        let e2 = MemoryEntry::new(Section::EnvironmentNotes, "second".into());
+        store.insert_entry(&e1, &emb()).expect("insert e1");
+        store.insert_entry(&e2, &emb()).expect("insert e2");
+
+        let all = store.list_entries(None).expect("list should succeed");
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn list_entries_by_section() {
+        let store = test_store();
+        let e1 = MemoryEntry::new(Section::ActiveThreads, "a".into());
+        let e2 = MemoryEntry::new(Section::EnvironmentNotes, "b".into());
+        let e3 = MemoryEntry::new(Section::ActiveThreads, "c".into());
+        store.insert_entry(&e1, &emb()).expect("insert e1");
+        store.insert_entry(&e2, &emb()).expect("insert e2");
+        store.insert_entry(&e3, &emb()).expect("insert e3");
+
+        let threads = store
+            .list_entries(Some(&Section::ActiveThreads))
+            .expect("list filtered");
+        assert_eq!(threads.len(), 2);
+        assert!(threads.iter().all(|e| e.section == Section::ActiveThreads));
+    }
+
+    #[test]
+    fn list_entries_empty() {
+        let store = test_store();
+        let entries = store.list_entries(None).expect("list empty should succeed");
+        assert!(entries.is_empty());
     }
 
     #[test]
@@ -464,27 +579,71 @@ mod tests {
         let store = test_store();
         let e1 = MemoryEntry::new(Section::ActiveThreads, "hello".into());
         let e2 = MemoryEntry::new(Section::EnvironmentNotes, "world!!!".into());
-        let emb = vec![0.1_f32; 4];
-        store.insert_entry(&e1, &emb).unwrap();
-        store.insert_entry(&e2, &emb).unwrap();
+        store.insert_entry(&e1, &emb()).expect("insert e1");
+        store.insert_entry(&e2, &emb()).expect("insert e2");
 
-        let total = store.total_chars(None).unwrap();
+        let total = store.total_chars(None).expect("total chars");
         assert_eq!(total, 13); // "hello" + "world!!!"
 
-        let threads_only = store.total_chars(Some(&Section::ActiveThreads)).unwrap();
+        let threads_only = store
+            .total_chars(Some(&Section::ActiveThreads))
+            .expect("section chars");
         assert_eq!(threads_only, 5);
     }
 
     #[test]
-    fn delete_entry() {
+    fn session_roundtrip() {
         let store = test_store();
-        let entry = MemoryEntry::new(Section::ActiveThreads, "temp".into());
-        let emb = vec![0.1_f32; 4];
-        store.insert_entry(&entry, &emb).unwrap();
-        store.delete_entry(entry.id).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 5, 31).expect("valid date");
+        let mut session = SessionLog::new(date, 1);
+        session.goal = Some("implement tests".into());
+        session.deliverables = vec!["unit tests".into(), "property tests".into()];
+        session.decisions = vec!["use proptest".into()];
+        session.open_threads = vec!["fuzz targets".into()];
 
-        let result = store.get_entry(entry.id);
-        assert!(result.is_err());
+        store.insert_session(&session).expect("insert session");
+
+        let sessions = store.get_sessions_for_date(date).expect("get sessions");
+        assert_eq!(sessions.len(), 1);
+
+        let s = &sessions[0];
+        assert_eq!(s.session_number, 1);
+        assert_eq!(s.goal.as_deref(), Some("implement tests"));
+        assert_eq!(s.deliverables.len(), 2);
+        assert_eq!(s.decisions, vec!["use proptest"]);
+        assert_eq!(s.open_threads, vec!["fuzz targets"]);
+    }
+
+    #[test]
+    fn session_for_date_empty() {
+        let store = test_store();
+        let date = NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date");
+        let sessions = store.get_sessions_for_date(date).expect("empty date");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn insert_transcript_happy_path() {
+        let store = test_store();
+        let date = NaiveDate::from_ymd_opt(2026, 5, 31).expect("valid date");
+        let session = SessionLog::new(date, 1);
+        store.insert_session(&session).expect("insert session");
+
+        let chunk = TranscriptChunk {
+            id: EntryId::new(),
+            session_id: session.id,
+            timestamp: Utc::now(),
+            content: "user asked about testing".into(),
+        };
+        store.insert_transcript(&chunk).expect("insert transcript");
+    }
+
+    #[test]
+    fn search_with_filter_returns_error() {
+        let store = test_store();
+        let filter = SearchFilter::Section(Section::ActiveThreads);
+        let result = store.search_similar(&[0.1; 4], 5, Some(&filter));
+        assert!(matches!(result, Err(MemxError::Other(_))));
     }
 
     #[test]
@@ -492,15 +651,76 @@ mod tests {
         let store = test_store();
         let e1 = MemoryEntry::new(Section::ActiveThreads, "rust programming".into());
         let e2 = MemoryEntry::new(Section::ActiveThreads, "python scripting".into());
-        store.insert_entry(&e1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        store.insert_entry(&e2, &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        store
+            .insert_entry(&e1, &[1.0, 0.0, 0.0, 0.0])
+            .expect("insert e1");
+        store
+            .insert_entry(&e2, &[0.0, 1.0, 0.0, 0.0])
+            .expect("insert e2");
 
         let results = store
             .search_similar(&[0.9, 0.1, 0.0, 0.0], 2, None)
-            .unwrap();
+            .expect("search should succeed");
         assert_eq!(results.len(), 2);
-        // First result should be closer to the query vector
         assert!(results[0].score >= results[1].score);
         assert_eq!(results[0].content, "rust programming");
+    }
+
+    #[test]
+    fn vector_search_empty_store() {
+        let store = test_store();
+        let results = store
+            .search_similar(&[1.0, 0.0, 0.0, 0.0], 5, None)
+            .expect("search empty");
+        assert!(results.is_empty());
+    }
+
+    // ── Conformance: Store trait contract ────────────────────────
+
+    fn assert_store_contract(store: &dyn Store) {
+        // Insert
+        let entry = MemoryEntry::new(Section::ActiveThreads, "contract test".into());
+        let embedding = vec![0.5_f32; 4];
+        store
+            .insert_entry(&entry, &embedding)
+            .expect("contract: insert");
+
+        // Get
+        let retrieved = store.get_entry(entry.id).expect("contract: get");
+        assert_eq!(retrieved.id, entry.id);
+        assert_eq!(retrieved.content, "contract test");
+
+        // List
+        let all = store.list_entries(None).expect("contract: list all");
+        assert!(all.iter().any(|e| e.id == entry.id));
+
+        let filtered = store
+            .list_entries(Some(&Section::ActiveThreads))
+            .expect("contract: list filtered");
+        assert!(filtered.iter().any(|e| e.id == entry.id));
+
+        // Total chars
+        let chars = store.total_chars(None).expect("contract: total chars");
+        assert!(chars >= "contract test".len());
+
+        // Search
+        let results = store
+            .search_similar(&embedding, 1, None)
+            .expect("contract: search");
+        assert!(!results.is_empty());
+
+        // Delete
+        store.delete_entry(entry.id).expect("contract: delete");
+        let gone = store.get_entry(entry.id);
+        assert!(
+            matches!(gone, Err(MemxError::NotFound(_))),
+            "contract: deleted entry should be NotFound"
+        );
+    }
+
+    #[test]
+    fn sqlite_store_satisfies_store_contract() {
+        let store = test_store();
+        assert_store_contract(&store);
     }
 }

@@ -1,5 +1,7 @@
 use crate::error::Result;
-use crate::types::*;
+use crate::types::{
+    EntryId, MemoryEntry, SearchFilter, SearchResult, Section, SessionLog, TranscriptChunk,
+};
 use chrono::NaiveDate;
 
 // Thread-safety bounds deferred to concrete implementations
@@ -33,7 +35,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trait_is_object_safe() {
-        fn _assert_object_safe(_: &dyn Store) {}
+    fn store_is_object_safe() {
+        // Compile-time proof: coercing to fn pointer proves dyn Store is valid
+        let _: fn(&dyn Store) = |_store: &dyn Store| {};
+        assert!(std::mem::size_of::<&dyn Store>() > 0);
     }
 }

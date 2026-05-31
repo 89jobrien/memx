@@ -11,10 +11,6 @@ impl EntryId {
     pub fn new() -> Self {
         Self(Ulid::new())
     }
-
-    pub fn from_ulid(ulid: Ulid) -> Self {
-        Self(ulid)
-    }
 }
 
 impl Default for EntryId {
@@ -23,6 +19,7 @@ impl Default for EntryId {
     }
 }
 
+// qual:allow(dry) reason: "trivial newtype delegation, no derive available"
 impl fmt::Display for EntryId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -46,6 +43,7 @@ pub enum Section {
 }
 
 impl Section {
+    // qual:allow(iosp) reason: "pure match dispatch, no I/O"
     pub fn as_str(&self) -> &str {
         match self {
             Self::ActiveThreads => "active_threads",
@@ -236,8 +234,14 @@ mod tests {
     fn entry_id_roundtrips_string() {
         let id = EntryId::new();
         let s = id.to_string();
-        let parsed: EntryId = s.parse().unwrap();
+        let parsed: EntryId = s.parse().expect("valid ULID should parse");
         assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn entry_id_from_str_rejects_invalid() {
+        let result = EntryId::from_str("not-a-ulid");
+        assert!(result.is_err());
     }
 
     #[test]
@@ -250,6 +254,47 @@ mod tests {
     }
 
     #[test]
+    fn section_from_str_known_variants() {
+        assert_eq!(
+            "active_threads".parse::<Section>().expect("known variant"),
+            Section::ActiveThreads
+        );
+        assert_eq!(
+            "environment_notes"
+                .parse::<Section>()
+                .expect("known variant"),
+            Section::EnvironmentNotes
+        );
+        assert_eq!(
+            "pending_decisions"
+                .parse::<Section>()
+                .expect("known variant"),
+            Section::PendingDecisions
+        );
+    }
+
+    #[test]
+    fn section_from_str_custom() {
+        let s: Section = "my_custom".parse().expect("custom always succeeds");
+        assert_eq!(s, Section::Custom("my_custom".into()));
+    }
+
+    #[test]
+    fn section_roundtrip_display_fromstr() {
+        let variants = [
+            Section::ActiveThreads,
+            Section::EnvironmentNotes,
+            Section::PendingDecisions,
+            Section::Custom("user_notes".into()),
+        ];
+        for v in &variants {
+            let s = v.to_string();
+            let parsed: Section = s.parse().expect("roundtrip should succeed");
+            assert_eq!(&parsed, v);
+        }
+    }
+
+    #[test]
     fn memory_entry_creation() {
         let entry = MemoryEntry::new(Section::ActiveThreads, "working on memx type system".into());
         assert_eq!(entry.section, Section::ActiveThreads);
@@ -259,7 +304,7 @@ mod tests {
 
     #[test]
     fn session_log_creation() {
-        let log = SessionLog::new(NaiveDate::from_ymd_opt(2026, 5, 22).unwrap(), 1);
+        let log = SessionLog::new(NaiveDate::from_ymd_opt(2026, 5, 22).expect("valid date"), 1);
         assert_eq!(log.session_number, 1);
         assert!(log.goal.is_none());
     }
@@ -269,6 +314,15 @@ mod tests {
         let q = SearchQuery::new("test query".into());
         assert_eq!(q.top_k, 5);
         assert!(q.filter.is_none());
+    }
+
+    #[test]
+    fn search_query_builder() {
+        let q = SearchQuery::new("test".into())
+            .with_top_k(10)
+            .with_filter(SearchFilter::Source(SourceKind::Memory));
+        assert_eq!(q.top_k, 10);
+        assert!(q.filter.is_some());
     }
 
     #[test]
@@ -288,5 +342,32 @@ mod tests {
 
         let remove = WriteAction::Remove { target: id };
         assert!(matches!(remove, WriteAction::Remove { .. }));
+    }
+
+    mod property {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn entry_id_string_roundtrip(_ in 0..1000u32) {
+                let id = EntryId::new();
+                let s = id.to_string();
+                let parsed: EntryId = s.parse()
+                    .expect("ULID roundtrip must succeed");
+                prop_assert_eq!(id, parsed);
+            }
+
+            #[test]
+            fn section_display_fromstr_roundtrip(
+                custom in "[a-z_]{1,50}"
+            ) {
+                let section = Section::Custom(custom);
+                let s = section.to_string();
+                let parsed: Section = s.parse()
+                    .expect("Section roundtrip must succeed");
+                prop_assert_eq!(section, parsed);
+            }
+        }
     }
 }

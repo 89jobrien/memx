@@ -10,9 +10,19 @@ static VEC_INIT: Once = Once::new();
 
 fn ensure_vec_extension() {
     VEC_INIT.call_once(|| unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite_vec::sqlite3_vec_init as *const (),
-        )));
+        // SAFETY: `sqlite3_vec_init` has the exact signature required by
+        // `sqlite3_auto_extension` — it is a valid SQLite extension entry point.
+        // The transmute converts between compatible function-pointer types (both
+        // are nullable pointers to C functions with the same ABI). This block
+        // executes exactly once via `Once::call_once`.
+        sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut i8,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(sqlite_vec::sqlite3_vec_init as *const ())));
     });
 }
 
@@ -94,6 +104,7 @@ impl SqliteStore {
         )?;
 
         if !exists {
+            // SAFETY: dims is usize — no SQL injection risk
             self.conn.execute_batch(&format!(
                 "CREATE VIRTUAL TABLE entries_vec USING vec0(
                     id TEXT PRIMARY KEY,
@@ -109,14 +120,13 @@ impl SqliteStore {
 impl Store for SqliteStore {
     fn insert_entry(&self, entry: &MemoryEntry, embedding: &[f32]) -> Result<()> {
         let id = entry.id.to_string();
-        let section = entry.section.as_str().to_string();
         let created = entry.created_at.to_rfc3339();
         let updated = entry.updated_at.to_rfc3339();
 
         self.conn.execute(
             "INSERT INTO entries (id, section, content, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, section, entry.content, created, updated],
+            params![id, entry.section.as_str(), entry.content, created, updated],
         )?;
 
         // sqlite-vec expects embedding as a raw byte blob of little-endian f32s
@@ -176,16 +186,33 @@ impl Store for SqliteStore {
                     let created_str: String = row.get(3)?;
                     let updated_str: String = row.get(4)?;
 
+                    let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
+                        .with_timezone(&Utc);
+                    let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_str)
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                4,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
+                        .with_timezone(&Utc);
+
                     Ok(MemoryEntry {
                         id,
-                        section: parse_section(&section_str),
+                        section: section_str
+                            .parse()
+                            .unwrap_or(Section::Custom(section_str.clone())),
                         content: row.get(2)?,
-                        created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
-                            .unwrap()
-                            .with_timezone(&Utc),
-                        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
-                            .unwrap()
-                            .with_timezone(&Utc),
+                        created_at,
+                        updated_at,
                     })
                 },
             )
@@ -203,7 +230,7 @@ impl Store for SqliteStore {
                     "SELECT id, section, content, created_at, updated_at
                      FROM entries WHERE section = ?1 ORDER BY created_at",
                 )?;
-                let rows = stmt.query_map(params![s.as_str()], |row| row_to_entry(row))?;
+                let rows = stmt.query_map(params![s.as_str()], row_to_entry)?;
                 for row in rows {
                     entries.push(row?);
                 }
@@ -213,7 +240,7 @@ impl Store for SqliteStore {
                     "SELECT id, section, content, created_at, updated_at
                      FROM entries ORDER BY created_at",
                 )?;
-                let rows = stmt.query_map([], |row| row_to_entry(row))?;
+                let rows = stmt.query_map([], row_to_entry)?;
                 for row in rows {
                     entries.push(row?);
                 }
@@ -240,6 +267,13 @@ impl Store for SqliteStore {
     }
 
     fn insert_session(&self, session: &SessionLog) -> Result<()> {
+        let deliverables = serde_json::to_string(&session.deliverables)
+            .map_err(|e| MemxError::Serialization(e.to_string()))?;
+        let decisions = serde_json::to_string(&session.decisions)
+            .map_err(|e| MemxError::Serialization(e.to_string()))?;
+        let open_threads = serde_json::to_string(&session.open_threads)
+            .map_err(|e| MemxError::Serialization(e.to_string()))?;
+
         self.conn.execute(
             "INSERT INTO sessions
              (id, date, session_number, goal, deliverables, decisions, open_threads)
@@ -249,9 +283,9 @@ impl Store for SqliteStore {
                 session.date.to_string(),
                 session.session_number,
                 session.goal,
-                serde_json::to_string(&session.deliverables).unwrap(),
-                serde_json::to_string(&session.decisions).unwrap(),
-                serde_json::to_string(&session.open_threads).unwrap(),
+                deliverables,
+                decisions,
+                open_threads,
             ],
         )?;
         Ok(())
@@ -270,14 +304,52 @@ impl Store for SqliteStore {
             let deliverables_str: String = row.get(4)?;
             let decisions_str: String = row.get(5)?;
             let threads_str: String = row.get(6)?;
+
+            let id = id_str.parse().map_err(|e: ulid::DecodeError| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            let parsed_date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            let deliverables: Vec<String> =
+                serde_json::from_str(&deliverables_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+            let decisions: Vec<String> = serde_json::from_str(&decisions_str).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            let open_threads: Vec<String> = serde_json::from_str(&threads_str).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+
             Ok(SessionLog {
-                id: id_str.parse().unwrap(),
-                date: NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").unwrap(),
+                id,
+                date: parsed_date,
                 session_number: row.get(2)?,
                 goal: row.get(3)?,
-                deliverables: serde_json::from_str(&deliverables_str).unwrap(),
-                decisions: serde_json::from_str(&decisions_str).unwrap(),
-                open_threads: serde_json::from_str(&threads_str).unwrap(),
+                deliverables,
+                decisions,
+                open_threads,
             })
         })?;
         let mut sessions = Vec::new();
@@ -322,8 +394,15 @@ impl Store for SqliteStore {
             let id_str: String = row.get(0)?;
             let distance: f64 = row.get(1)?;
             let content: String = row.get(2)?;
+            let entry_id = id_str.parse().map_err(|e: ulid::DecodeError| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
             Ok(SearchResult {
-                source: MatchSource::Memory(id_str.parse().unwrap()),
+                source: MatchSource::Memory(entry_id),
                 content,
                 score: 1.0 - distance as f32,
             })
@@ -337,31 +416,34 @@ impl Store for SqliteStore {
     }
 }
 
-fn parse_section(s: &str) -> Section {
-    match s {
-        "active_threads" => Section::ActiveThreads,
-        "environment_notes" => Section::EnvironmentNotes,
-        "pending_decisions" => Section::PendingDecisions,
-        other => Section::Custom(other.to_string()),
-    }
-}
-
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryEntry> {
     let id_str: String = row.get(0)?;
     let section_str: String = row.get(1)?;
     let created_str: String = row.get(3)?;
     let updated_str: String = row.get(4)?;
 
+    let id = id_str.parse().map_err(|e: ulid::DecodeError| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+        })?
+        .with_timezone(&Utc);
+    let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_str)
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
+        })?
+        .with_timezone(&Utc);
+
     Ok(MemoryEntry {
-        id: id_str.parse().unwrap(),
-        section: parse_section(&section_str),
+        id,
+        section: section_str
+            .parse()
+            .unwrap_or(Section::Custom(section_str.clone())),
         content: row.get(2)?,
-        created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
-            .unwrap()
-            .with_timezone(&Utc),
-        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
-            .unwrap()
-            .with_timezone(&Utc),
+        created_at,
+        updated_at,
     })
 }
 

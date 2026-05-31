@@ -62,6 +62,19 @@ impl fmt::Display for Section {
     }
 }
 
+impl FromStr for Section {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "active_threads" => Section::ActiveThreads,
+            "environment_notes" => Section::EnvironmentNotes,
+            "pending_decisions" => Section::PendingDecisions,
+            other => Section::Custom(other.to_string()),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
     pub id: EntryId,

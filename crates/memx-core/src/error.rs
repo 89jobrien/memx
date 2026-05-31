@@ -17,6 +17,12 @@ pub enum MemxError {
     #[error("embedding error: {0}")]
     Embedding(String),
 
+    #[error("parse error: {0}")]
+    Parse(String),
+
+    #[error("serialization error: {0}")]
+    Serialization(String),
+
     #[error("{0}")]
     Other(#[from] anyhow::Error),
 }

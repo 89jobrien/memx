@@ -3,8 +3,10 @@
 
 # handoff-begin
 .ctx/*
-!.ctx/HANDOFF.*.yaml
-.ctx/HANDOFF.*.state.yaml
-!.ctx/handoff.*.config.toml.example
+!.ctx/memory-bank
 .ctx/.initialized
 # handoff-end
+!.**/*.example
+!.ctx/HANDOFF.md
+!.ctx/HANDOFF.memx.memx.yaml
+.ctx/crs-stats.json

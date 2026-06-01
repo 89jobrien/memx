@@ -96,49 +96,71 @@ impl SqliteStore {
     }
 }
 
+fn embedding_blob(embedding: &[f32]) -> Vec<u8> {
+    embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+fn parse_rfc3339(
+    s: &str,
+    col: usize,
+) -> std::result::Result<chrono::DateTime<Utc>, rusqlite::Error> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(col, rusqlite::types::Type::Text, Box::new(e))
+        })
+}
+
+fn parse_ulid(s: &str, col: usize) -> std::result::Result<EntryId, rusqlite::Error> {
+    s.parse().map_err(|e: ulid::DecodeError| {
+        rusqlite::Error::FromSqlConversionFailure(col, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
+fn parse_json_vec(s: &str, col: usize) -> std::result::Result<Vec<String>, rusqlite::Error> {
+    serde_json::from_str(s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(col, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
 impl Store for SqliteStore {
     fn insert_entry(&self, entry: &MemoryEntry, embedding: &[f32]) -> Result<()> {
         let id = entry.id.to_string();
-        let created = entry.created_at.to_rfc3339();
-        let updated = entry.updated_at.to_rfc3339();
-
         self.conn.execute(
             "INSERT INTO entries (id, section, content, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, entry.section.as_str(), entry.content, created, updated],
+            params![
+                id,
+                entry.section.as_str(),
+                entry.content,
+                entry.created_at.to_rfc3339(),
+                entry.updated_at.to_rfc3339()
+            ],
         )?;
-
-        // sqlite-vec expects embedding as a raw byte blob of little-endian f32s
-        let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
-
         self.conn.execute(
             "INSERT INTO entries_vec (id, embedding) VALUES (?1, ?2)",
-            params![id, blob],
+            params![id, embedding_blob(embedding)],
         )?;
-
         Ok(())
     }
 
     fn update_entry(&self, entry: &MemoryEntry, embedding: &[f32]) -> Result<()> {
         let id = entry.id.to_string();
-        let section = entry.section.as_str().to_string();
-        let updated = Utc::now().to_rfc3339();
-
         let changed = self.conn.execute(
             "UPDATE entries SET section = ?1, content = ?2, updated_at = ?3
              WHERE id = ?4",
-            params![section, entry.content, updated, id],
+            params![
+                entry.section.as_str().to_string(),
+                entry.content,
+                Utc::now().to_rfc3339(),
+                id
+            ],
         )?;
-
         require_affected(changed, entry.id)?;
-
-        let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
-
         self.conn.execute(
             "UPDATE entries_vec SET embedding = ?1 WHERE id = ?2",
-            params![blob, id],
+            params![embedding_blob(embedding), id],
         )?;
-
         Ok(())
     }
 
@@ -162,36 +184,14 @@ impl Store for SqliteStore {
                 params![id_str],
                 |row| {
                     let section_str: String = row.get(1)?;
-                    let created_str: String = row.get(3)?;
-                    let updated_str: String = row.get(4)?;
-
-                    let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
-                        .map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                3,
-                                rusqlite::types::Type::Text,
-                                Box::new(e),
-                            )
-                        })?
-                        .with_timezone(&Utc);
-                    let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_str)
-                        .map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                4,
-                                rusqlite::types::Type::Text,
-                                Box::new(e),
-                            )
-                        })?
-                        .with_timezone(&Utc);
-
                     Ok(MemoryEntry {
                         id,
                         section: section_str
                             .parse()
                             .unwrap_or(Section::Custom(section_str.clone())),
                         content: row.get(2)?,
-                        created_at,
-                        updated_at,
+                        created_at: parse_rfc3339(&row.get::<_, String>(3)?, 3)?,
+                        updated_at: parse_rfc3339(&row.get::<_, String>(4)?, 4)?,
                     })
                 },
             )
@@ -278,19 +278,7 @@ impl Store for SqliteStore {
              ORDER BY session_number",
         )?;
         let rows = stmt.query_map(params![date.to_string()], |row| {
-            let id_str: String = row.get(0)?;
             let date_str: String = row.get(1)?;
-            let deliverables_str: String = row.get(4)?;
-            let decisions_str: String = row.get(5)?;
-            let threads_str: String = row.get(6)?;
-
-            let id = id_str.parse().map_err(|e: ulid::DecodeError| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
             let parsed_date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
                     1,
@@ -298,37 +286,15 @@ impl Store for SqliteStore {
                     Box::new(e),
                 )
             })?;
-            let deliverables: Vec<String> =
-                serde_json::from_str(&deliverables_str).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        4,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
-            let decisions: Vec<String> = serde_json::from_str(&decisions_str).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    5,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-            let open_threads: Vec<String> = serde_json::from_str(&threads_str).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    6,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
 
             Ok(SessionLog {
-                id,
+                id: parse_ulid(&row.get::<_, String>(0)?, 0)?,
                 date: parsed_date,
                 session_number: row.get(2)?,
                 goal: row.get(3)?,
-                deliverables,
-                decisions,
-                open_threads,
+                deliverables: parse_json_vec(&row.get::<_, String>(4)?, 4)?,
+                decisions: parse_json_vec(&row.get::<_, String>(5)?, 5)?,
+                open_threads: parse_json_vec(&row.get::<_, String>(6)?, 6)?,
             })
         })?;
         let mut sessions = Vec::new();
@@ -363,7 +329,6 @@ impl Store for SqliteStore {
                 "search filters not yet implemented"
             )));
         }
-        let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
 
         let mut stmt = self.conn.prepare(
             "SELECT v.id, v.distance, e.content
@@ -374,20 +339,11 @@ impl Store for SqliteStore {
              ORDER BY v.distance",
         )?;
 
-        let rows = stmt.query_map(params![blob, top_k as i64], |row| {
-            let id_str: String = row.get(0)?;
+        let rows = stmt.query_map(params![embedding_blob(embedding), top_k as i64], |row| {
             let distance: f64 = row.get(1)?;
-            let content: String = row.get(2)?;
-            let entry_id = id_str.parse().map_err(|e: ulid::DecodeError| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
             Ok(SearchResult {
-                source: MatchSource::Memory(entry_id),
-                content,
+                source: MatchSource::Memory(parse_ulid(&row.get::<_, String>(0)?, 0)?),
+                content: row.get(2)?,
                 score: 1.0 - distance as f32,
             })
         })?;
@@ -407,34 +363,25 @@ fn require_affected(changed: usize, id: EntryId) -> Result<()> {
     Ok(())
 }
 
-fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryEntry> {
-    let id_str: String = row.get(0)?;
-    let section_str: String = row.get(1)?;
-    let created_str: String = row.get(3)?;
-    let updated_str: String = row.get(4)?;
+// Column indices for SELECT id, section, content, created_at, updated_at
+const COL_ID: usize = 0;
+const COL_SECTION: usize = 1;
+const COL_CONTENT: usize = 2;
+const COL_CREATED_AT: usize = 3;
+const COL_UPDATED_AT: usize = 4;
 
-    let id = id_str.parse().map_err(|e: ulid::DecodeError| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-    })?;
-    let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
-        .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
-        })?
-        .with_timezone(&Utc);
-    let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_str)
-        .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
-        })?
-        .with_timezone(&Utc);
+fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryEntry> {
+    let id_str: String = row.get(COL_ID)?;
+    let section_str: String = row.get(COL_SECTION)?;
 
     Ok(MemoryEntry {
-        id,
+        id: parse_ulid(&id_str, COL_ID)?,
         section: section_str
             .parse()
             .unwrap_or(Section::Custom(section_str.clone())),
-        content: row.get(2)?,
-        created_at,
-        updated_at,
+        content: row.get(COL_CONTENT)?,
+        created_at: parse_rfc3339(&row.get::<_, String>(COL_CREATED_AT)?, COL_CREATED_AT)?,
+        updated_at: parse_rfc3339(&row.get::<_, String>(COL_UPDATED_AT)?, COL_UPDATED_AT)?,
     })
 }
 
@@ -454,7 +401,7 @@ mod tests {
     // ── Unit tests ──────────────────────────────────────────────
 
     #[test]
-    fn open_creates_db_file() {
+    fn sqlite_store_open_creates_db_file() {
         let dir = tempfile::tempdir().expect("tempdir should create");
         let path = dir.path().join("test.db");
         let store = SqliteStore::open(&path, 4).expect("open should succeed");
@@ -463,14 +410,14 @@ mod tests {
     }
 
     #[test]
-    fn open_and_migrate() {
+    fn sqlite_store_open_and_migrate() {
         let store = test_store();
         let count = store.total_chars(None).expect("empty store");
         assert_eq!(count, 0);
     }
 
     #[test]
-    fn insert_and_retrieve_entry() {
+    fn sqlite_store_insert_and_retrieve_entry() {
         let store = test_store();
         let entry = MemoryEntry::new(Section::ActiveThreads, "working on memx".into());
         store
@@ -483,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn update_entry_happy_path() {
+    fn sqlite_store_update_entry_happy_path() {
         let store = test_store();
         let mut entry = MemoryEntry::new(Section::ActiveThreads, "original".into());
         store
@@ -502,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn update_entry_not_found() {
+    fn sqlite_store_update_entry_not_found() {
         let store = test_store();
         let entry = MemoryEntry::new(Section::ActiveThreads, "ghost".into());
         let result = store.update_entry(&entry, &emb());
@@ -510,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_entry_existing() {
+    fn sqlite_store_delete_entry_existing() {
         let store = test_store();
         let entry = MemoryEntry::new(Section::ActiveThreads, "temp".into());
         store
@@ -523,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_entry_not_found() {
+    fn sqlite_store_delete_entry_not_found() {
         let store = test_store();
         let id = EntryId::new();
         let result = store.delete_entry(id);
@@ -531,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn get_entry_not_found() {
+    fn sqlite_store_get_entry_not_found() {
         let store = test_store();
         let id = EntryId::new();
         let result = store.get_entry(id);
@@ -539,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn list_entries_all() {
+    fn sqlite_store_list_entries_all() {
         let store = test_store();
         let e1 = MemoryEntry::new(Section::ActiveThreads, "first".into());
         let e2 = MemoryEntry::new(Section::EnvironmentNotes, "second".into());
@@ -551,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn list_entries_by_section() {
+    fn sqlite_store_list_entries_by_section() {
         let store = test_store();
         let e1 = MemoryEntry::new(Section::ActiveThreads, "a".into());
         let e2 = MemoryEntry::new(Section::EnvironmentNotes, "b".into());
@@ -568,14 +515,14 @@ mod tests {
     }
 
     #[test]
-    fn list_entries_empty() {
+    fn sqlite_store_list_entries_empty() {
         let store = test_store();
         let entries = store.list_entries(None).expect("list empty should succeed");
         assert!(entries.is_empty());
     }
 
     #[test]
-    fn total_chars_by_section() {
+    fn sqlite_store_total_chars_by_section() {
         let store = test_store();
         let e1 = MemoryEntry::new(Section::ActiveThreads, "hello".into());
         let e2 = MemoryEntry::new(Section::EnvironmentNotes, "world!!!".into());
@@ -592,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn session_roundtrip() {
+    fn sqlite_store_session_roundtrip() {
         let store = test_store();
         let date = NaiveDate::from_ymd_opt(2026, 5, 31).expect("valid date");
         let mut session = SessionLog::new(date, 1);
@@ -615,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn session_for_date_empty() {
+    fn sqlite_store_session_for_date_empty() {
         let store = test_store();
         let date = NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date");
         let sessions = store.get_sessions_for_date(date).expect("empty date");
@@ -623,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_transcript_happy_path() {
+    fn sqlite_store_insert_transcript_happy_path() {
         let store = test_store();
         let date = NaiveDate::from_ymd_opt(2026, 5, 31).expect("valid date");
         let session = SessionLog::new(date, 1);
@@ -639,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn search_with_filter_returns_error() {
+    fn sqlite_store_search_with_filter_returns_error() {
         let store = test_store();
         let filter = SearchFilter::Section(Section::ActiveThreads);
         let result = store.search_similar(&[0.1; 4], 5, Some(&filter));
@@ -647,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn vector_search_returns_results() {
+    fn sqlite_store_vector_search_returns_results() {
         let store = test_store();
         let e1 = MemoryEntry::new(Section::ActiveThreads, "rust programming".into());
         let e2 = MemoryEntry::new(Section::ActiveThreads, "python scripting".into());
@@ -667,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn vector_search_empty_store() {
+    fn sqlite_store_vector_search_empty() {
         let store = test_store();
         let results = store
             .search_similar(&[1.0, 0.0, 0.0, 0.0], 5, None)
@@ -678,19 +625,16 @@ mod tests {
     // ── Conformance: Store trait contract ────────────────────────
 
     fn assert_store_contract(store: &dyn Store) {
-        // Insert
         let entry = MemoryEntry::new(Section::ActiveThreads, "contract test".into());
         let embedding = vec![0.5_f32; 4];
         store
             .insert_entry(&entry, &embedding)
             .expect("contract: insert");
 
-        // Get
         let retrieved = store.get_entry(entry.id).expect("contract: get");
         assert_eq!(retrieved.id, entry.id);
         assert_eq!(retrieved.content, "contract test");
 
-        // List
         let all = store.list_entries(None).expect("contract: list all");
         assert!(all.iter().any(|e| e.id == entry.id));
 
@@ -699,17 +643,14 @@ mod tests {
             .expect("contract: list filtered");
         assert!(filtered.iter().any(|e| e.id == entry.id));
 
-        // Total chars
         let chars = store.total_chars(None).expect("contract: total chars");
         assert!(chars >= "contract test".len());
 
-        // Search
         let results = store
             .search_similar(&embedding, 1, None)
             .expect("contract: search");
         assert!(!results.is_empty());
 
-        // Delete
         store.delete_entry(entry.id).expect("contract: delete");
         let gone = store.get_entry(entry.id);
         assert!(
@@ -727,16 +668,15 @@ mod tests {
     // ── Unit edge cases ────────────────────────────────────────────
 
     #[test]
-    fn transcript_without_session_fk_fails() {
+    fn sqlite_store_transcript_without_session_fk_fails() {
         let store = test_store();
-        // Enable FK enforcement (SQLite has it off by default)
         store
             .conn
             .execute_batch("PRAGMA foreign_keys = ON")
             .expect("pragma");
         let chunk = TranscriptChunk {
             id: EntryId::new(),
-            session_id: EntryId::new(), // no matching session
+            session_id: EntryId::new(),
             timestamp: Utc::now(),
             content: "orphan chunk".into(),
         };
@@ -745,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn search_score_in_zero_one_range() {
+    fn sqlite_store_search_score_in_zero_one_range() {
         let store = test_store();
         let e = MemoryEntry::new(Section::ActiveThreads, "test".into());
         store
@@ -763,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn session_with_unicode_roundtrips() {
+    fn sqlite_store_session_with_unicode_roundtrips() {
         let store = test_store();
         let date = NaiveDate::from_ymd_opt(2026, 6, 1).expect("valid");
         let mut session = SessionLog::new(date, 1);
@@ -782,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_entry_with_empty_content() {
+    fn sqlite_store_insert_entry_with_empty_content() {
         let store = test_store();
         let e = MemoryEntry::new(Section::ActiveThreads, String::new());
         store.insert_entry(&e, &emb()).expect("insert empty");
@@ -792,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_insert_fails() {
+    fn sqlite_store_duplicate_insert_fails() {
         let store = test_store();
         let e = MemoryEntry::new(Section::ActiveThreads, "dup".into());
         store.insert_entry(&e, &emb()).expect("first insert");
@@ -808,7 +748,7 @@ mod tests {
 
         proptest! {
             #[test]
-            fn insert_get_roundtrip_content(content in "\\PC{0,500}") {
+            fn sqlite_store_insert_get_roundtrip_content(content in "\\PC{0,500}") {
                 let store = test_store();
                 let entry = MemoryEntry::new(Section::ActiveThreads, content.clone());
                 store.insert_entry(&entry, &emb()).expect("insert");
@@ -817,7 +757,7 @@ mod tests {
             }
 
             #[test]
-            fn total_chars_matches_sum(
+            fn sqlite_store_total_chars_matches_sum(
                 contents in proptest::collection::vec("\\PC{1,100}", 1..10)
             ) {
                 let store = test_store();
@@ -832,7 +772,7 @@ mod tests {
             }
 
             #[test]
-            fn list_filtered_never_leaks_other_sections(
+            fn sqlite_store_list_filtered_never_leaks(
                 a_count in 1..5usize,
                 b_count in 1..5usize,
             ) {
@@ -855,7 +795,7 @@ mod tests {
             }
 
             #[test]
-            fn delete_then_get_is_not_found(
+            fn sqlite_store_delete_then_get_is_not_found(
                 content in "\\PC{1,100}",
                 section in prop_oneof![
                     Just(Section::ActiveThreads),

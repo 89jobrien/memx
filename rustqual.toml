@@ -2,3 +2,7 @@
 # Dead code detection off — pub API is consumed cross-crate
 [duplicates]
 detect_dead_code = false
+
+[srp]
+# sqlite_store.rs is a single-adapter file — 340 lines is acceptable
+file_length_baseline = 400

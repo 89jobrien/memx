@@ -34,9 +34,9 @@ pub trait Store {
 mod tests {
     use super::*;
 
+    // qual:allow(test) reason: "compile-time proof, no callable SUT"
     #[test]
-    fn store_is_object_safe() {
-        // Compile-time proof: coercing to fn pointer proves dyn Store is valid
+    fn dyn_store_is_object_safe() {
         let _: fn(&dyn Store) = |_store: &dyn Store| {};
         assert!(std::mem::size_of::<&dyn Store>() > 0);
     }

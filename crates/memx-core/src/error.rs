@@ -12,7 +12,7 @@ pub enum MemxError {
     Duplicate,
 
     #[error("storage error: {0}")]
-    Storage(#[from] rusqlite::Error),
+    Storage(String),
 
     #[error("embedding error: {0}")]
     Embedding(String),
@@ -22,6 +22,9 @@ pub enum MemxError {
 
     #[error("serialization error: {0}")]
     Serialization(String),
+
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
 
     #[error("{0}")]
     Other(#[from] anyhow::Error),
@@ -45,9 +48,8 @@ mod tests {
     }
 
     #[test]
-    fn memx_error_from_rusqlite() {
-        let sql_err = rusqlite::Error::QueryReturnedNoRows;
-        let err = MemxError::from(sql_err);
-        assert!(matches!(err, MemxError::Storage(_)));
+    fn storage_error_contains_message() {
+        let err = MemxError::Storage("connection failed".into());
+        assert!(err.to_string().contains("connection failed"));
     }
 }

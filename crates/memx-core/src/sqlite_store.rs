@@ -1,5 +1,5 @@
 use crate::error::{MemxError, Result};
-use crate::store::Store;
+use crate::store::{EntryStore, SessionStore, TranscriptStore, VectorSearch};
 use crate::types::{
     EntryId, MatchSource, MemoryEntry, SearchFilter, SearchResult, Section, SessionLog,
     TranscriptChunk,
@@ -32,7 +32,7 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>, dims: usize) -> Result<Self> {
         ensure_vec_extension();
-        let conn = Connection::open(path)?;
+        let conn = Connection::open(path).map_err(sql_err)?;
         let store = Self { conn };
         store.migrate_with_dimensions(dims)?;
         Ok(store)
@@ -40,15 +40,16 @@ impl SqliteStore {
 
     pub fn open_in_memory(dims: usize) -> Result<Self> {
         ensure_vec_extension();
-        let conn = Connection::open_in_memory()?;
+        let conn = Connection::open_in_memory().map_err(sql_err)?;
         let store = Self { conn };
         store.migrate_with_dimensions(dims)?;
         Ok(store)
     }
 
     fn migrate_with_dimensions(&self, dims: usize) -> Result<()> {
-        self.conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS entries (
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS entries (
                 id TEXT PRIMARY KEY,
                 section TEXT NOT NULL,
                 content TEXT NOT NULL,
@@ -73,23 +74,29 @@ impl SqliteStore {
                 content TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );",
-        )?;
+            )
+            .map_err(sql_err)?;
 
-        let exists: bool = self.conn.query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
              WHERE type='table' AND name='entries_vec'",
-            [],
-            |row| row.get(0),
-        )?;
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sql_err)?;
 
         if !exists {
             // SAFETY: dims is usize — no SQL injection risk
-            self.conn.execute_batch(&format!(
-                "CREATE VIRTUAL TABLE entries_vec USING vec0(
+            self.conn
+                .execute_batch(&format!(
+                    "CREATE VIRTUAL TABLE entries_vec USING vec0(
                     id TEXT PRIMARY KEY,
                     embedding float[{dims}]
                 );"
-            ))?;
+                ))
+                .map_err(sql_err)?;
         }
 
         Ok(())
@@ -123,44 +130,53 @@ fn parse_json_vec(s: &str, col: usize) -> std::result::Result<Vec<String>, rusql
     })
 }
 
-impl Store for SqliteStore {
+impl EntryStore for SqliteStore {
     fn insert_entry(&self, entry: &MemoryEntry, embedding: &[f32]) -> Result<()> {
         let id = entry.id.to_string();
-        self.conn.execute(
-            "INSERT INTO entries (id, section, content, created_at, updated_at)
+        self.conn
+            .execute(
+                "INSERT INTO entries (id, section, content, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                id,
-                entry.section.as_str(),
-                entry.content,
-                entry.created_at.to_rfc3339(),
-                entry.updated_at.to_rfc3339()
-            ],
-        )?;
-        self.conn.execute(
-            "INSERT INTO entries_vec (id, embedding) VALUES (?1, ?2)",
-            params![id, embedding_blob(embedding)],
-        )?;
+                params![
+                    id,
+                    entry.section.as_str(),
+                    entry.content,
+                    entry.created_at.to_rfc3339(),
+                    entry.updated_at.to_rfc3339()
+                ],
+            )
+            .map_err(sql_err)?;
+        self.conn
+            .execute(
+                "INSERT INTO entries_vec (id, embedding) VALUES (?1, ?2)",
+                params![id, embedding_blob(embedding)],
+            )
+            .map_err(sql_err)?;
         Ok(())
     }
 
     fn update_entry(&self, entry: &MemoryEntry, embedding: &[f32]) -> Result<()> {
         let id = entry.id.to_string();
-        let changed = self.conn.execute(
-            "UPDATE entries SET section = ?1, content = ?2, updated_at = ?3
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE entries SET section = ?1, content = ?2, updated_at = ?3
              WHERE id = ?4",
-            params![
-                entry.section.as_str().to_string(),
-                entry.content,
-                Utc::now().to_rfc3339(),
-                id
-            ],
-        )?;
+                params![
+                    entry.section.as_str().to_string(),
+                    entry.content,
+                    Utc::now().to_rfc3339(),
+                    id
+                ],
+            )
+            .map_err(sql_err)?;
         require_affected(changed, entry.id)?;
-        self.conn.execute(
-            "UPDATE entries_vec SET embedding = ?1 WHERE id = ?2",
-            params![embedding_blob(embedding), id],
-        )?;
+        self.conn
+            .execute(
+                "UPDATE entries_vec SET embedding = ?1 WHERE id = ?2",
+                params![embedding_blob(embedding), id],
+            )
+            .map_err(sql_err)?;
         Ok(())
     }
 
@@ -168,10 +184,12 @@ impl Store for SqliteStore {
         let id_str = id.to_string();
         let changed = self
             .conn
-            .execute("DELETE FROM entries WHERE id = ?1", params![id_str])?;
+            .execute("DELETE FROM entries WHERE id = ?1", params![id_str])
+            .map_err(sql_err)?;
         require_affected(changed, id)?;
         self.conn
-            .execute("DELETE FROM entries_vec WHERE id = ?1", params![id_str])?;
+            .execute("DELETE FROM entries_vec WHERE id = ?1", params![id_str])
+            .map_err(sql_err)?;
         Ok(())
     }
 
@@ -197,7 +215,7 @@ impl Store for SqliteStore {
             )
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => MemxError::NotFound(id),
-                other => MemxError::Storage(other),
+                other => sql_err(other),
             })
     }
 
@@ -205,23 +223,31 @@ impl Store for SqliteStore {
         let mut entries = Vec::new();
         match section {
             Some(s) => {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id, section, content, created_at, updated_at
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT id, section, content, created_at, updated_at
                      FROM entries WHERE section = ?1 ORDER BY created_at",
-                )?;
-                let rows = stmt.query_map(params![s.as_str()], row_to_entry)?;
+                    )
+                    .map_err(sql_err)?;
+                let rows = stmt
+                    .query_map(params![s.as_str()], row_to_entry)
+                    .map_err(sql_err)?;
                 for row in rows {
-                    entries.push(row?);
+                    entries.push(row.map_err(sql_err)?);
                 }
             }
             None => {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id, section, content, created_at, updated_at
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT id, section, content, created_at, updated_at
                      FROM entries ORDER BY created_at",
-                )?;
-                let rows = stmt.query_map([], row_to_entry)?;
+                    )
+                    .map_err(sql_err)?;
+                let rows = stmt.query_map([], row_to_entry).map_err(sql_err)?;
                 for row in rows {
-                    entries.push(row?);
+                    entries.push(row.map_err(sql_err)?);
                 }
             }
         }
@@ -230,21 +256,29 @@ impl Store for SqliteStore {
 
     fn total_chars(&self, section: Option<&Section>) -> Result<usize> {
         let total: i64 = match section {
-            Some(s) => self.conn.query_row(
-                "SELECT COALESCE(SUM(LENGTH(content)), 0)
+            Some(s) => self
+                .conn
+                .query_row(
+                    "SELECT COALESCE(SUM(LENGTH(content)), 0)
                  FROM entries WHERE section = ?1",
-                params![s.as_str()],
-                |row| row.get(0),
-            )?,
-            None => self.conn.query_row(
-                "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM entries",
-                [],
-                |row| row.get(0),
-            )?,
+                    params![s.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(sql_err)?,
+            None => self
+                .conn
+                .query_row(
+                    "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM entries",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(sql_err)?,
         };
         Ok(total as usize)
     }
+}
 
+impl SessionStore for SqliteStore {
     fn insert_session(&self, session: &SessionLog) -> Result<()> {
         let deliverables = serde_json::to_string(&session.deliverables)
             .map_err(|e| MemxError::Serialization(e.to_string()))?;
@@ -253,71 +287,85 @@ impl Store for SqliteStore {
         let open_threads = serde_json::to_string(&session.open_threads)
             .map_err(|e| MemxError::Serialization(e.to_string()))?;
 
-        self.conn.execute(
-            "INSERT INTO sessions
+        self.conn
+            .execute(
+                "INSERT INTO sessions
              (id, date, session_number, goal, deliverables, decisions, open_threads)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                session.id.to_string(),
-                session.date.to_string(),
-                session.session_number,
-                session.goal,
-                deliverables,
-                decisions,
-                open_threads,
-            ],
-        )?;
+                params![
+                    session.id.to_string(),
+                    session.date.to_string(),
+                    session.session_number,
+                    session.goal,
+                    deliverables,
+                    decisions,
+                    open_threads,
+                ],
+            )
+            .map_err(sql_err)?;
         Ok(())
     }
 
     fn get_sessions_for_date(&self, date: NaiveDate) -> Result<Vec<SessionLog>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, date, session_number, goal,
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, date, session_number, goal,
                     deliverables, decisions, open_threads
              FROM sessions WHERE date = ?1
              ORDER BY session_number",
-        )?;
-        let rows = stmt.query_map(params![date.to_string()], |row| {
-            let date_str: String = row.get(1)?;
-            let parsed_date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    1,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![date.to_string()], |row| {
+                let date_str: String = row.get(1)?;
+                let parsed_date =
+                    NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
 
-            Ok(SessionLog {
-                id: parse_ulid(&row.get::<_, String>(0)?, 0)?,
-                date: parsed_date,
-                session_number: row.get(2)?,
-                goal: row.get(3)?,
-                deliverables: parse_json_vec(&row.get::<_, String>(4)?, 4)?,
-                decisions: parse_json_vec(&row.get::<_, String>(5)?, 5)?,
-                open_threads: parse_json_vec(&row.get::<_, String>(6)?, 6)?,
+                Ok(SessionLog {
+                    id: parse_ulid(&row.get::<_, String>(0)?, 0)?,
+                    date: parsed_date,
+                    session_number: row.get(2)?,
+                    goal: row.get(3)?,
+                    deliverables: parse_json_vec(&row.get::<_, String>(4)?, 4)?,
+                    decisions: parse_json_vec(&row.get::<_, String>(5)?, 5)?,
+                    open_threads: parse_json_vec(&row.get::<_, String>(6)?, 6)?,
+                })
             })
-        })?;
+            .map_err(sql_err)?;
         let mut sessions = Vec::new();
         for row in rows {
-            sessions.push(row?);
+            sessions.push(row.map_err(sql_err)?);
         }
         Ok(sessions)
     }
+}
 
+impl TranscriptStore for SqliteStore {
     fn insert_transcript(&self, chunk: &TranscriptChunk) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO transcripts (id, session_id, timestamp, content)
+        self.conn
+            .execute(
+                "INSERT INTO transcripts (id, session_id, timestamp, content)
              VALUES (?1, ?2, ?3, ?4)",
-            params![
-                chunk.id.to_string(),
-                chunk.session_id.to_string(),
-                chunk.timestamp.to_rfc3339(),
-                chunk.content,
-            ],
-        )?;
+                params![
+                    chunk.id.to_string(),
+                    chunk.session_id.to_string(),
+                    chunk.timestamp.to_rfc3339(),
+                    chunk.content,
+                ],
+            )
+            .map_err(sql_err)?;
         Ok(())
     }
+}
 
+impl VectorSearch for SqliteStore {
     fn search_similar(
         &self,
         embedding: &[f32],
@@ -330,30 +378,39 @@ impl Store for SqliteStore {
             )));
         }
 
-        let mut stmt = self.conn.prepare(
-            "SELECT v.id, v.distance, e.content
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT v.id, v.distance, e.content
              FROM entries_vec v
              JOIN entries e ON e.id = v.id
              WHERE v.embedding MATCH ?1
              AND k = ?2
              ORDER BY v.distance",
-        )?;
+            )
+            .map_err(sql_err)?;
 
-        let rows = stmt.query_map(params![embedding_blob(embedding), top_k as i64], |row| {
-            let distance: f64 = row.get(1)?;
-            Ok(SearchResult {
-                source: MatchSource::Memory(parse_ulid(&row.get::<_, String>(0)?, 0)?),
-                content: row.get(2)?,
-                score: 1.0 - distance as f32,
+        let rows = stmt
+            .query_map(params![embedding_blob(embedding), top_k as i64], |row| {
+                let distance: f64 = row.get(1)?;
+                Ok(SearchResult {
+                    source: MatchSource::Memory(parse_ulid(&row.get::<_, String>(0)?, 0)?),
+                    content: row.get(2)?,
+                    score: 1.0 - distance as f32,
+                })
             })
-        })?;
+            .map_err(sql_err)?;
 
         let mut results = Vec::new();
         for row in rows {
-            results.push(row?);
+            results.push(row.map_err(sql_err)?);
         }
         Ok(results)
     }
+}
+
+fn sql_err(e: rusqlite::Error) -> MemxError {
+    MemxError::Storage(e.to_string())
 }
 
 fn require_affected(changed: usize, id: EntryId) -> Result<()> {
@@ -624,7 +681,7 @@ mod tests {
 
     // ── Conformance: Store trait contract ────────────────────────
 
-    fn assert_store_contract(store: &dyn Store) {
+    fn assert_store_contract(store: &(impl EntryStore + VectorSearch)) {
         let entry = MemoryEntry::new(Section::ActiveThreads, "contract test".into());
         let embedding = vec![0.5_f32; 4];
         store
@@ -682,6 +739,10 @@ mod tests {
         };
         let result = store.insert_transcript(&chunk);
         assert!(result.is_err(), "FK violation should fail with PRAGMA on");
+        assert!(
+            matches!(result, Err(MemxError::Storage(_))),
+            "should map to Storage variant"
+        );
     }
 
     #[test]

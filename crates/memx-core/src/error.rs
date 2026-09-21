@@ -1,3 +1,5 @@
+//! Errors returned by memory storage, embedding, and budget operations.
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

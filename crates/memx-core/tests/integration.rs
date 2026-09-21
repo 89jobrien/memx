@@ -4,7 +4,7 @@
 //! flow without requiring a real model.
 
 use memx_core::sqlite_store::SqliteStore;
-use memx_core::store::Store;
+use memx_core::store::{EntryStore, VectorSearch};
 use memx_core::types::{MemoryEntry, Section};
 
 const DIMS: usize = 4;

@@ -1,3 +1,5 @@
+//! SQLite-backed persistence and vector search for memory data.
+
 use crate::error::{MemxError, Result};
 use crate::store::{EntryStore, SessionStore, TranscriptStore, VectorSearch};
 use crate::types::{
@@ -30,6 +32,7 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    /// Opens or creates a database and initializes tables for `dims`-wide embeddings.
     pub fn open(path: impl AsRef<Path>, dims: usize) -> Result<Self> {
         ensure_vec_extension();
         let conn = Connection::open(path).map_err(sql_err)?;
@@ -38,6 +41,7 @@ impl SqliteStore {
         Ok(store)
     }
 
+    /// Creates an in-memory database for `dims`-wide embeddings.
     pub fn open_in_memory(dims: usize) -> Result<Self> {
         ensure_vec_extension();
         let conn = Connection::open_in_memory().map_err(sql_err)?;

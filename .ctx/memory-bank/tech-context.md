@@ -17,7 +17,7 @@
 
 ## Build commands
 
-```
+```text
 cargo build          # build all crates
 cargo test           # run all tests
 cargo clippy         # lint
@@ -34,7 +34,7 @@ cargo clippy         # lint
 
 ## Repo structure
 
-```
+```text
 Cargo.toml                          # workspace root
 crates/
   memx-core/

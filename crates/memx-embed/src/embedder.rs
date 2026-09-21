@@ -1,7 +1,11 @@
+//! Backend-neutral text embedding interface.
+
 // Thread-safety bounds deferred to concrete implementations
 pub trait Embedder {
+    /// Embeds each input text in the same order it was provided.
     fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>>;
 
+    /// Embeds one text and rejects an empty backend response.
     fn embed_one(&self, text: &str) -> anyhow::Result<Vec<f32>> {
         let mut results = self.embed(&[text])?;
         results
@@ -9,8 +13,10 @@ pub trait Embedder {
             .ok_or_else(|| anyhow::anyhow!("embed returned empty results"))
     }
 
+    /// Returns the number of values in each embedding vector.
     fn dimensions(&self) -> usize;
 
+    /// Returns the backend model identifier.
     fn model_id(&self) -> &str;
 }
 

@@ -33,3 +33,15 @@
 {"cwd":"/Users/joe/dev/memx","event":"session.start","session_id":"c9f7b24-1780335206709","ts":"2026-06-01T17:33:26Z"}
 {"event":"session.end","session_id":"c9f7b24-1780335206709","ts":"2026-06-01T18:01:44Z"}
 {"event":"session.end","session_id":"c9f7b24-1780335206709","ts":"2026-06-01T18:12:11Z"}
+{"event":"session.end","session_id":"c9f7b24-1780335206709","ts":"2026-06-01T19:33:54Z"}
+{"cwd":"/Users/joe/dev/memx","event":"session.start","session_id":"6c09e58-1780357814153","ts":"2026-06-01T23:50:14Z"}
+{"event":"session.end","session_id":"6c09e58-1780357814153","ts":"2026-06-01T23:52:00Z"}
+{"event":"session.end","session_id":"6c09e58-1780357814153","ts":"2026-06-02T00:08:00Z"}
+{"event":"session.end","session_id":"6c09e58-1780357814153","ts":"2026-06-02T00:08:53Z"}
+{"event":"session.end","session_id":"6c09e58-1780357814153","ts":"2026-06-02T00:14:22Z"}
+{"event":"session.end","session_id":"6c09e58-1780357814153","ts":"2026-06-02T00:15:31Z"}
+{"event":"session.end","session_id":"6c09e58-1780357814153","ts":"2026-06-02T01:52:19Z"}
+{"event":"session.end","session_id":"6c09e58-1780357814153","ts":"2026-06-02T01:55:48Z"}
+{"event":"session.end","session_id":"6c09e58-1780357814153","ts":"2026-06-02T02:39:48Z"}
+{"cwd":"/Users/joe/dev/memx","event":"session.start","session_id":"58f22c1-1780389886527","ts":"2026-06-02T08:44:46Z"}
+{"event":"session.end","session_id":"58f22c1-1780389886527","ts":"2026-06-02T08:45:58Z"}

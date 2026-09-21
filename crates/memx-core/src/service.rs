@@ -1,5 +1,7 @@
+//! Coordinates memory writes and semantic search across storage and embedding backends.
+
 use crate::error::{MemxError, Result};
-use crate::store::Store;
+use crate::store::{EntryStore, VectorSearch};
 use crate::types::{
     EntryId, MemoryEntry, SearchResult, Section, WriteAction, WriteActionKind, WriteResult,
 };
@@ -11,7 +13,8 @@ pub struct MemxService<S, E> {
     budget: Option<usize>,
 }
 
-impl<S: Store, E: Embedder> MemxService<S, E> {
+impl<S: EntryStore + VectorSearch, E: Embedder> MemxService<S, E> {
+    /// Creates a service with no character budget.
     pub fn new(store: S, embedder: E) -> Self {
         Self {
             store,
@@ -20,11 +23,13 @@ impl<S: Store, E: Embedder> MemxService<S, E> {
         }
     }
 
+    /// Limits the total stored memory content to `max_chars` characters.
     pub fn with_budget(mut self, max_chars: usize) -> Self {
         self.budget = Some(max_chars);
         self
     }
 
+    /// Applies an add, replace, or remove action to the memory store.
     pub fn execute(&self, action: WriteAction) -> Result<WriteResult> {
         match action {
             WriteAction::Add { section, content } => self.add(section, content),
@@ -33,6 +38,7 @@ impl<S: Store, E: Embedder> MemxService<S, E> {
         }
     }
 
+    /// Embeds `query` and returns up to `top_k` nearest memory entries.
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
         let embedding = self
             .embedder
@@ -443,7 +449,7 @@ mod tests {
     // ── Conformance: MemxService contract ─────────────────────────
 
     fn assert_service_contract(svc: &MemxService<SqliteStore, FixedEmbedder>) {
-        // Add
+        // Adding persists the entry and reports its character usage.
         let added = svc
             .execute(WriteAction::Add {
                 section: Section::ActiveThreads,
@@ -453,7 +459,7 @@ mod tests {
         assert_eq!(added.action, WriteActionKind::Added);
         assert!(added.chars_used >= "contract entry".len());
 
-        // Replace
+        // Replacing preserves the entry identity while updating its content.
         let replaced = svc
             .execute(WriteAction::Replace {
                 target: added.entry_id,
@@ -470,7 +476,7 @@ mod tests {
             "contract: search should find replaced entry"
         );
 
-        // Remove
+        // Removing reports the deleted entry identity.
         let removed = svc
             .execute(WriteAction::Remove {
                 target: added.entry_id,

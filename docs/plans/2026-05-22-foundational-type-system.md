@@ -1,3 +1,8 @@
+---
+status: done
+completed: 2026-05-31
+---
+
 # Plan: Foundational Type System
 
 ## Goal
@@ -58,7 +63,7 @@ memory entries from Rust.
    serde_json = "1"
    thiserror = "2"
    ulid = { version = "1", features = ["serde"] }
-   rusqlite = { version = "0.34", features = ["bundled", "loadable_extension"] }
+   rusqlite = { version = "0.34", features = ["bundled"] }
    anyhow = "1"
    ```
 
@@ -116,7 +121,7 @@ memory entries from Rust.
 
 6. Verify:
 
-   ```
+   ```text
    cargo check --workspace   -> compiles
    ```
 
@@ -236,7 +241,7 @@ memory entries from Rust.
 
 3. Verify:
 
-   ```
+   ```text
    cargo nextest run -p memx-core    -> all green
    cargo clippy -p memx-core -- -D warnings  -> zero warnings
    ```
@@ -386,7 +391,7 @@ memory entries from Rust.
 
 3. Verify:
 
-   ```
+   ```text
    cargo nextest run -p memx-core    -> all green
    cargo clippy -p memx-core -- -D warnings  -> zero warnings
    ```
@@ -534,7 +539,7 @@ memory entries from Rust.
 
 3. Verify:
 
-   ```
+   ```text
    cargo nextest run -p memx-core    -> all green
    cargo clippy -p memx-core -- -D warnings  -> zero warnings
    ```
@@ -609,7 +614,7 @@ memory entries from Rust.
 
 3. Verify:
 
-   ```
+   ```text
    cargo nextest run -p memx-core    -> all green
    cargo clippy -p memx-core -- -D warnings  -> zero warnings
    ```
@@ -700,7 +705,7 @@ memory entries from Rust.
 
 3. Verify:
 
-   ```
+   ```text
    cargo nextest run -p memx-embed    -> all green
    cargo clippy -p memx-embed -- -D warnings  -> zero warnings
    ```
@@ -776,7 +781,7 @@ memory entries from Rust.
 
 4. Verify:
 
-   ```
+   ```text
    cargo nextest run -p memx-core    -> all green
    cargo clippy -p memx-core -- -D warnings  -> zero warnings
    ```
@@ -1318,7 +1323,7 @@ memory entries from Rust.
 
 5. Verify:
 
-   ```
+   ```text
    cargo nextest run -p memx-core    -> all green
    cargo clippy -p memx-core -- -D warnings  -> zero warnings
    ```

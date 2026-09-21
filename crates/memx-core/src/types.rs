@@ -1,3 +1,5 @@
+//! Domain types for memory entries, sessions, searches, and write actions.
+
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -8,6 +10,7 @@ use ulid::Ulid;
 pub struct EntryId(Ulid);
 
 impl EntryId {
+    /// Generates a new ULID-backed entry identifier.
     pub fn new() -> Self {
         Self(Ulid::new())
     }
@@ -44,6 +47,7 @@ pub enum Section {
 
 impl Section {
     // qual:allow(iosp) reason: "pure match dispatch, no I/O"
+    /// Returns the stable storage name for this section.
     pub fn as_str(&self) -> &str {
         match self {
             Self::ActiveThreads => "active_threads",
@@ -83,6 +87,7 @@ pub struct MemoryEntry {
 }
 
 impl MemoryEntry {
+    /// Creates a timestamped memory entry with a new identifier.
     pub fn new(section: Section, content: String) -> Self {
         let now = Utc::now();
         Self {
@@ -107,6 +112,7 @@ pub struct SessionLog {
 }
 
 impl SessionLog {
+    /// Creates an empty session log with a new identifier.
     pub fn new(date: NaiveDate, session_number: u32) -> Self {
         Self {
             id: EntryId::new(),
@@ -143,6 +149,7 @@ pub struct SearchQuery {
 }
 
 impl SearchQuery {
+    /// Creates an unfiltered query that returns up to five results.
     pub fn new(text: String) -> Self {
         Self {
             text,
@@ -151,11 +158,13 @@ impl SearchQuery {
         }
     }
 
+    /// Sets the maximum number of search results.
     pub fn with_top_k(mut self, top_k: usize) -> Self {
         self.top_k = top_k;
         self
     }
 
+    /// Restricts the search to items matching `filter`.
     pub fn with_filter(mut self, filter: SearchFilter) -> Self {
         self.filter = Some(filter);
         self
